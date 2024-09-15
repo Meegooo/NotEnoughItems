@@ -69,11 +69,10 @@ public class CraftingGraph {
     public CraftingGraph(Map<String, CraftingGraphNode> nodes) {
         this.nodes = nodes;
         for (CraftingGraphNode node : nodes.values()) {
-            if (node instanceof RecipeGraphNode) {
-                RecipeGraphNode recipeNode = (RecipeGraphNode) node;
+            if (node instanceof RecipeGraphNode recipeNode) {
                 recipeNode.getRecipe().allIngredients.stream().flatMap(Collection::stream)
                         .forEach(it -> itemStackDummies.put(getItemStackGUID(it), it));
-                recipeNode.getRecipe().result.stream().forEach(it -> itemStackDummies.put(getItemStackGUID(it), it));
+                recipeNode.getRecipe().result.forEach(it -> itemStackDummies.put(getItemStackGUID(it), it));
             }
         }
     }
@@ -104,8 +103,7 @@ public class CraftingGraph {
             String requestedKey = queueElement.requestedKey;
 
             // Handle item node.
-            if (node instanceof ItemGraphNode) {
-                ItemGraphNode itemGraphNode = (ItemGraphNode) node;
+            if (node instanceof ItemGraphNode itemGraphNode) {
                 itemGraphNode.addCrafts(queueElement.requestedAmount);
                 inputTotal.compute(requestedKey, (k, v) -> (v == null ? 0 : v) + queueElement.requestedAmount);
                 continue;
@@ -206,8 +204,7 @@ public class CraftingGraph {
         }
 
         for (CraftingGraphNode node : distinctNodes.keySet()) {
-            if (node instanceof RecipeGraphNode) {
-                RecipeGraphNode recipeNode = (RecipeGraphNode) node;
+            if (node instanceof RecipeGraphNode recipeNode) {
                 for (ItemStackWithMetadata pinnedOutput : recipeNode.getPinnedOutputs()) {
                     String key = getItemStackGUID(pinnedOutput.getStack());
                     int newCount = recipeNode.getRecipe().result.stream()
