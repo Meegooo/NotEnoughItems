@@ -1173,10 +1173,12 @@ public class BookmarkPanel extends PanelWidget {
                 final BookmarkGroup groupMeta = this.groups.get(meta.groupId);
                 ItemStack drawStack = realStack;
 
-                if (groupMeta.crafting != null && groupMeta.crafting.getCalculatedItems().containsKey(idx)) {
+                if (groupMeta.crafting != null) {
                     ItemStack craftingItemStack = groupMeta.crafting.getCalculatedItems().get(idx);
                     if (craftingItemStack != null) {
                         drawStack = craftingItemStack;
+                    } else {
+                        drawStack = StackInfo.loadFromNBT(StackInfo.itemStackToNBT(drawStack), 0);
                     }
                 }
 
@@ -2715,8 +2717,9 @@ public class BookmarkPanel extends PanelWidget {
                         }
                     } else {
                         if (!overMeta.ingredient) {
-                            if (overMeta.fluidDisplay) {
-                                shiftMultiplier *= overMeta.factor;
+                            Integer stackSize = StackInfo.getFluidCellSize(BGrid.getItem(slot.slotIndex));
+                            if (overMeta.fluidDisplay && stackSize != null) {
+                                shiftMultiplier *= stackSize;
                             }
                             overMeta.requestedAmount += shift * shiftMultiplier;
                         }
