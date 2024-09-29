@@ -2,6 +2,7 @@ package codechicken.nei.bookmarks.crafts.graph;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -9,6 +10,7 @@ import net.minecraft.item.ItemStack;
 
 import codechicken.nei.BookmarkPanel.BookmarkRecipe;
 import codechicken.nei.bookmarks.crafts.ItemStackWithMetadata;
+import codechicken.nei.recipe.BookmarkRecipeId;
 import codechicken.nei.recipe.StackInfo;
 
 public class RecipeGraphNode implements CraftingGraphNode {
@@ -19,10 +21,12 @@ public class RecipeGraphNode implements CraftingGraphNode {
     private final Map<String, Integer> pinnedOutputKeys = new HashMap<>();
     private final BookmarkRecipe recipe;
 
-    private final List<Map<String, ItemStack>> recipeIngredients = new ArrayList<>();
+    private final List<Map<String, Integer>> recipeIngredients = new ArrayList<>();
+    private final Map<String, Integer> recipeOutputs = new LinkedHashMap<>();
 
     private int crafts = 0;
-    private Map<String, Integer> remainders;
+    private final Map<String, Integer> remainders = new HashMap<>();
+    private final Map<String, Integer> chainInputs = new HashMap<>();
 
     public RecipeGraphNode(BookmarkRecipe recipe, List<ItemStackWithMetadata> pinnedInputs,
             List<ItemStackWithMetadata> pinnedOutputs) {
@@ -37,13 +41,20 @@ public class RecipeGraphNode implements CraftingGraphNode {
         }
 
         for (List<ItemStack> slotIngredients : recipe.allIngredients) {
-            Map<String, ItemStack> ingredientMap = new HashMap<>();
+            Map<String, Integer> ingredientMap = new HashMap<>();
             for (ItemStack ingredient : slotIngredients) {
-                ingredientMap.put(StackInfo.getItemStackGUID(ingredient), ingredient);
+                String key = StackInfo.getItemStackGUID(ingredient);
+                int size = CraftingGraph.getStackSize(ingredient);
+                ingredientMap.compute(key, (k, v) -> v == null ? size : v + size);
             }
             recipeIngredients.add(ingredientMap);
         }
-        this.remainders = new HashMap<>();
+
+        for (ItemStack output : recipe.result) {
+            String key = StackInfo.getItemStackGUID(output);
+            int size = CraftingGraph.getStackSize(output);
+            recipeOutputs.compute(key, (k, v) -> v == null ? size : v + size);
+        }
     }
 
     public List<ItemStackWithMetadata> getPinnedInputs() {
@@ -62,48 +73,58 @@ public class RecipeGraphNode implements CraftingGraphNode {
         return pinnedOutputKeys;
     }
 
-    public List<Map<String, ItemStack>> getRecipeIngredients() {
+    public List<Map<String, Integer>> getRecipeIngredients() {
         return recipeIngredients;
     }
 
-    public BookmarkRecipe getRecipe() {
-        return recipe;
+    public Map<String, Integer> getRecipeOutputs() {
+        return recipeOutputs;
+    }
+
+    public BookmarkRecipeId getRecipeId() {
+        return recipe.getRecipeId();
     }
 
     public int getCrafts() {
         return crafts;
     }
 
-    public int addCrafts(int crafts) {
+    public void addCrafts(int crafts) {
         this.crafts += crafts;
-        return this.crafts;
     }
 
-    public int takeFromRemainders(String itemKey, int requestedAmount) {
-        if (remainders.containsKey(itemKey)) {
-            int remainder = remainders.remove(itemKey);
-            int requiredNew = requestedAmount - remainder;
-            if (requiredNew > 0) {
-                remainders.put(itemKey, -requiredNew);
-                return requiredNew;
-            } else if (requiredNew < 0) {
-                remainders.put(itemKey, -requiredNew);
-            }
-            return 0;
-        } else {
-            remainders.put(itemKey, -requestedAmount);
-            return requestedAmount;
-        }
-    }
-
-    public void addToRemainders(String itemKey, int remainder) {
+    @Override
+    public int addToRemainders(String itemKey, int remainder) {
         remainders.compute(itemKey, (k, v) -> {
             int result = (v == null ? 0 : v) + remainder;
             if (result == 0) return null;
             return result;
         });
+        return remainders.getOrDefault(itemKey, 0);
     }
 
+    @Override
+    public int getRemainder(String itemKey) {
+        return remainders.getOrDefault(itemKey, 0);
+    }
+
+    public int getChainInput(String itemKey) {
+        return chainInputs.getOrDefault(itemKey, 0);
+    }
+
+    public void addToChainInputs(String itemKey, int size) {
+        chainInputs.compute(itemKey, (k, v) -> {
+            int result = (v == null ? 0 : v) + size;
+            if (result == 0) return null;
+            return result;
+        });
+    }
+
+    public Map<String, Integer> getChainInputs() {
+        return chainInputs;
+    }
+
+    @Override
     public Map<String, Integer> getRemainders() {
         return remainders;
     }

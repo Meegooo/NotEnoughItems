@@ -1,7 +1,11 @@
 
 package codechicken.nei.bookmarks.crafts.graph;
 
+import java.util.Collections;
+import java.util.Map;
+
 import codechicken.nei.bookmarks.crafts.ItemStackWithMetadata;
+import codechicken.nei.recipe.StackInfo;
 
 public class ItemGraphNode implements CraftingGraphNode {
 
@@ -17,16 +21,19 @@ public class ItemGraphNode implements CraftingGraphNode {
         return pinnedItem;
     }
 
-    public int getRequestedItems() {
+    @Override
+    public int addToRemainders(String itemKey, int remainder) {
+        requestedItems -= remainder;
         return requestedItems;
     }
 
-    public void addToRemainders(String itemKey, int remainder) {
-        requestedItems -= remainder;
+    @Override
+    public Map<String, Integer> getRemainders() {
+        return Collections.singletonMap(StackInfo.getItemStackGUID(pinnedItem.getStack()), -requestedItems);
     }
 
-    public int addCrafts(int crafts) {
-        this.requestedItems += crafts;
-        return this.requestedItems;
+    @Override
+    public int getRemainder(String itemKey) {
+        return -requestedItems;
     }
 }

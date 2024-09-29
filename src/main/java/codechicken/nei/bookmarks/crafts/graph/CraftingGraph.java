@@ -2,13 +2,12 @@ package codechicken.nei.bookmarks.crafts.graph;
 
 import static codechicken.nei.recipe.StackInfo.getItemStackGUID;
 
-import java.util.ArrayDeque;
-import java.util.Collection;
-import java.util.Deque;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -16,6 +15,7 @@ import java.util.Set;
 
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraftforge.fluids.FluidStack;
 
 import codechicken.nei.NEIServerUtils;
 import codechicken.nei.bookmarks.crafts.ItemStackWithMetadata;
@@ -24,229 +24,403 @@ import codechicken.nei.recipe.StackInfo;
 
 public class CraftingGraph {
 
-    private static class QueueElement {
+    private final Map<String, CraftingGraphNode> nodes = new HashMap<>();
+    private final Map<String, List<CraftingGraphNode>> allNodes = new HashMap<>();
 
-        private final CraftingGraphNode node;
-        private final String requestedKey;
-        private final int requestedAmount;
-        private final Set<BookmarkRecipeId> history;
+    private final Map<String, Integer> requestedItems = new HashMap<>();
 
-        public QueueElement(CraftingGraphNode node, String requestedKey, int requestedAmount) {
-            this(node, requestedKey, requestedAmount, new HashSet<>());
-        }
+    private final Map<String, ItemStack> itemStackMapping = new HashMap<>();
 
-        public QueueElement(CraftingGraphNode node, String requestedKey, int requestedAmount,
-                Set<BookmarkRecipeId> history) {
-            this.node = node;
-            this.requestedKey = requestedKey;
-            this.requestedAmount = requestedAmount;
-            this.history = history;
-        }
+    // For showing numbers on top of stacks
+    private final Map<Integer, ItemStack> calculatedItems = new LinkedHashMap<>();
+    private final Map<Integer, ItemStack> calculatedRemainders = new LinkedHashMap<>();
+    private final Map<Integer, Integer> calculatedCraftCounts = new LinkedHashMap<>();
 
-        public QueueElement withNextNode(CraftingGraphNode newNode, String requestedItemKey, int requestedItemCount) {
-            Set<BookmarkRecipeId> newHistory = new HashSet<>(this.history);
-            if (this.node instanceof RecipeGraphNode) {
-                newHistory.add(((RecipeGraphNode) this.node).getRecipe().getRecipeId());
+    // For coloring stack backgrounds
+    private final Set<Integer> inputSlots = new HashSet<>();
+    private final Set<Integer> conflictingSlots = new HashSet<>();
+    private final Set<Integer> outputSlots = new HashSet<>();
+
+    // For the tooltip
+    private final List<ItemStack> inputStacks = new ArrayList<>();
+    private final List<ItemStack> outputStacks = new ArrayList<>();
+    private final List<ItemStack> remainingStacks = new ArrayList<>();
+
+    public void addNode(ItemStackWithMetadata output, CraftingGraphNode node) {
+        String key = StackInfo.getItemStackGUID(output.getStack());
+        if (!nodes.containsKey(key) || !(nodes.get(key) instanceof RecipeGraphNode)) {
+            nodes.put(key, node);
+            if (output.getMeta().requestedAmount != 0) {
+                requestedItems.put(key, output.getMeta().requestedAmount);
             }
-            return new QueueElement(newNode, requestedItemKey, requestedItemCount, newHistory);
+        } else {
+            conflictingSlots.add(output.getGridIdx());
+        }
+        if (node instanceof RecipeGraphNode || node instanceof FluidConversionGraphNode) {
+            if (!allNodes.containsKey(key)) {
+                allNodes.put(key, new ArrayList<>());
+            }
+            allNodes.get(key).add(node);
         }
     }
 
-    private Map<String, CraftingGraphNode> nodes;
+    public void runAll() {
+        preProcess();
+        for (Map.Entry<String, Integer> entry : requestedItems.entrySet()) {
+            if (nodes.containsKey(entry.getKey())) {
+                CraftingGraphNode node = nodes.get(entry.getKey());
+                if (entry.getValue() < 0) {
+                    node.addToRemainders(entry.getKey(), -entry.getValue());
+                }
+            }
+        }
+        for (Map.Entry<String, Integer> entry : requestedItems.entrySet()) {
+            if (entry.getValue() > 0) {
+                dfs(entry.getKey(), entry.getValue(), new HashSet<>(), true);
+            }
+        }
+        postProcess();
+    }
 
-    private Map<String, ItemStack> itemStackDummies = new HashMap<>();
-
-    private Map<Integer, ItemStack> calculatedItems = new HashMap<>();
-    private Map<Integer, Integer> calculatedCraftCounts = new HashMap<>();
-
-    private Set<Integer> inputSlots = new HashSet<>();
-    private Set<Integer> craftedOutputSlots = new HashSet<>();
-
-    private Set<ItemStack> inputStacks = new HashSet<>();
-    private Set<ItemStack> outputStacks = new HashSet<>();
-    private Set<ItemStack> remainingStacks = new HashSet<>();
-
-    public CraftingGraph(Map<String, CraftingGraphNode> nodes) {
-        this.nodes = nodes;
+    public void preProcess() {
         for (CraftingGraphNode node : nodes.values()) {
             if (node instanceof RecipeGraphNode recipeNode) {
-                recipeNode.getRecipe().allIngredients.stream().flatMap(Collection::stream)
-                        .forEach(it -> itemStackDummies.put(getItemStackGUID(it), it));
-                recipeNode.getRecipe().result.forEach(it -> itemStackDummies.put(getItemStackGUID(it), it));
+                for (ItemStackWithMetadata stack : recipeNode.getPinnedInputs()) {
+                    itemStackMapping.put(getItemStackGUID(stack.getStack()), stack.getStack());
+                }
+                for (ItemStackWithMetadata stack : recipeNode.getPinnedOutputs()) {
+                    itemStackMapping.put(getItemStackGUID(stack.getStack()), stack.getStack());
+                }
+            }
+        }
+
+        // Add fake fluid conversion recipes
+        // Identity LinkedHashSet is intentional
+        Map<String, LinkedHashSet<ItemStackWithMetadata>> recipesWithFluidOutputs = new HashMap<>();
+        Map<String, LinkedHashSet<ItemStackWithMetadata>> recipesWithFluidInputs = new HashMap<>();
+
+        for (CraftingGraphNode node : nodes.values()) {
+            if (node instanceof RecipeGraphNode recipeNode) {
+                for (ItemStackWithMetadata pinnedOutput : recipeNode.getPinnedOutputs()) {
+                    tryAddFluid(pinnedOutput, recipesWithFluidOutputs);
+                }
+            }
+        }
+        for (CraftingGraphNode node : nodes.values()) {
+            if (node instanceof RecipeGraphNode recipeNode) {
+                for (ItemStackWithMetadata pinnedInput : recipeNode.getPinnedInputs()) {
+                    tryAddFluid(pinnedInput, recipesWithFluidInputs);
+                }
+            }
+        }
+        Set<String> commonFluids = new HashSet<>(recipesWithFluidInputs.keySet());
+        commonFluids.retainAll(recipesWithFluidOutputs.keySet());
+        for (String commonFluid : commonFluids) {
+            // inversion of input <-> output is intentional
+            LinkedHashSet<ItemStackWithMetadata> nodeOutputs = recipesWithFluidInputs.get(commonFluid);
+            LinkedHashSet<ItemStackWithMetadata> nodeInputs = recipesWithFluidOutputs.get(commonFluid);
+            FluidConversionGraphNode node = new FluidConversionGraphNode(nodeInputs, nodeOutputs);
+            for (ItemStackWithMetadata output : nodeOutputs) {
+                String outputKey = getItemStackGUID(output.getStack());
+                if (!nodes.containsKey(outputKey)) {
+                    nodes.put(outputKey, node);
+                }
+                if (!allNodes.containsKey(outputKey)) {
+                    allNodes.put(outputKey, new ArrayList<>());
+                }
+                allNodes.get(outputKey).add(node);
             }
         }
     }
 
-    public void dfs(List<ItemStackWithMetadata> request) {
-        Deque<QueueElement> stack = new ArrayDeque<>();
-
-        Map<String, Integer> inputTotal = new HashMap<>();
-
-        for (ItemStackWithMetadata item : request) {
-            String key = getItemStackGUID(item.getStack());
-            int requestedAmount = item.getMeta().requestedAmount;
-            if (nodes.containsKey(key)) {
-                CraftingGraphNode node = nodes.get(key);
-                if (requestedAmount > 0) {
-                    stack.addFirst(new QueueElement(node, key, requestedAmount));
-                    outputStacks.add(withStackSize(item.getStack(), requestedAmount));
-                } else if (requestedAmount < 0) {
-                    node.addToRemainders(key, -requestedAmount);
-                }
-            }
+    private void tryAddFluid(ItemStackWithMetadata pinnedItem,
+            Map<String, LinkedHashSet<ItemStackWithMetadata>> recipesWithFluids) {
+        FluidStack fluidStack = StackInfo.getFluid(pinnedItem.getStack());
+        if (fluidStack == null) {
+            return;
         }
-
-        while (!stack.isEmpty()) {
-            QueueElement queueElement = stack.pollFirst();
-            CraftingGraphNode node = queueElement.node;
-            Set<BookmarkRecipeId> history = queueElement.history;
-            String requestedKey = queueElement.requestedKey;
-
-            // Handle item node.
-            if (node instanceof ItemGraphNode itemGraphNode) {
-                itemGraphNode.addCrafts(queueElement.requestedAmount);
-                inputTotal.compute(requestedKey, (k, v) -> (v == null ? 0 : v) + queueElement.requestedAmount);
-                continue;
-            }
-
-            RecipeGraphNode recipeNode = (RecipeGraphNode) node;
-            BookmarkRecipeId recipeId = recipeNode.getRecipe().getRecipeId();
-
-            // Handle recursive recipes
-            if (history.contains(recipeId)) {
-                inputTotal.compute(requestedKey, (k, v) -> (v == null ? 0 : v) + queueElement.requestedAmount);
-                continue;
-            }
-
-            int requestedAmount = recipeNode.takeFromRemainders(requestedKey, queueElement.requestedAmount);
-
-            // Calculate number of requested crafts
-            int crafts = 0;
-            for (ItemStack outputItemStack : recipeNode.getRecipe().result) {
-                if (Objects.equals(getItemStackGUID(outputItemStack), requestedKey) && requestedAmount > 0) {
-                    crafts = NEIServerUtils.divideCeil(requestedAmount, getStackSize(outputItemStack));
-                    break;
-                }
-            }
-
-            for (ItemStack outputItemStack : recipeNode.getRecipe().result) {
-                String key = getItemStackGUID(outputItemStack);
-                if (recipeNode.getPinnedOutputKeys().containsKey(key)) {
-                    recipeNode.addToRemainders(key, getStackSize(outputItemStack) * crafts);
-                }
-            }
-
-            if (crafts == 0) {
-                continue;
-            }
-
-            recipeNode.addCrafts(crafts);
-            final int finalCrafts = crafts;
-
-            // Process inputs
-            final Map<String, Integer> ingredientsToRequest = new LinkedHashMap<>();
-            final Map<String, Integer> chainInputs = new LinkedHashMap<>();
-
-            for (Map<String, ItemStack> ingredientCandidates : recipeNode.getRecipeIngredients()) {
-                // Intersect current recipe pinned inputs with recipe inputs
-                Set<String> pinnedCurrentRecipeInputs = new HashSet<>(recipeNode.getPinnedInputKeys().keySet());
-                pinnedCurrentRecipeInputs.retainAll(ingredientCandidates.keySet());
-                // Intersect all pinned outputs with recipe inputs
-                Set<String> pinnedRecipeOutputs = new HashSet<>(nodes.keySet());
-                pinnedRecipeOutputs.retainAll(ingredientCandidates.keySet());
-
-                if (!pinnedCurrentRecipeInputs.isEmpty() && !pinnedRecipeOutputs.isEmpty()) {
-                    // If item is pinned, proceed to try and request craft.
-                    String key = pinnedRecipeOutputs.iterator().next();
-                    ItemStack ingredient = ingredientCandidates.get(key);
-                    ingredientsToRequest
-                            .compute(key, (k, v) -> (v == null ? 0 : v) + getStackSize(ingredient) * finalCrafts);
-                } else if (!pinnedCurrentRecipeInputs.isEmpty()) {
-                    // Otherwise add pinned item to crafting chain inputs
-                    String key = pinnedCurrentRecipeInputs.iterator().next();
-                    ItemStack ingredient = ingredientCandidates.get(key);
-                    chainInputs.compute(key, (k, v) -> (v == null ? 0 : v) + getStackSize(ingredient) * finalCrafts);
-                    this.inputSlots.add(recipeNode.getPinnedInputKeys().get(key));
-                }
-
-            }
-
-            for (Map.Entry<String, Integer> entry : ingredientsToRequest.entrySet()) {
-                CraftingGraphNode requestedNode = nodes.get(entry.getKey());
-                stack.addFirst(queueElement.withNextNode(requestedNode, entry.getKey(), entry.getValue()));
-            }
-            for (Map.Entry<String, Integer> entry : chainInputs.entrySet()) {
-                inputTotal.compute(entry.getKey(), (k, v) -> (v == null ? 0 : v) + entry.getValue());
-            }
+        String fluidKey = getFluidKey(fluidStack);
+        if (!recipesWithFluids.containsKey(fluidKey)) {
+            recipesWithFluids.put(fluidKey, new LinkedHashSet<>());
         }
-        postProcess(inputTotal);
+        recipesWithFluids.get(fluidKey).add(pinnedItem);
+        ItemStack fluidDisplayStack = StackInfo.getFluidDisplayStack(fluidStack);
+        if (fluidDisplayStack != null) {
+            itemStackMapping.put(getItemStackGUID(fluidDisplayStack), fluidDisplayStack);
+        }
     }
 
-    public void postProcess(Map<String, Integer> inputTotal) {
+    public int dfs(String requestedKey, int requestedAmount, HashSet<BookmarkRecipeId> history, boolean keepOutputs) {
+        CraftingGraphNode node = this.nodes.get(requestedKey);
+        if (node == null) {
+            return 0;
+        }
+
+        // Handle item node
+        if (node instanceof ItemGraphNode itemGraphNode) {
+            itemGraphNode.addToRemainders(requestedKey, -requestedAmount);
+            return requestedAmount;
+        }
+
+        // Handle fluid conversion
+        if (node instanceof FluidConversionGraphNode fluidNode) {
+            String keyToRequest = fluidNode.getInputKey();
+            int itemAmountToRequest = fluidNode.calculateAmountToRequest(requestedKey, requestedAmount, keyToRequest);
+
+            int returnedItemAmount = dfs(keyToRequest, itemAmountToRequest, history, false);
+
+            return fluidNode.processResults(requestedKey, keyToRequest, requestedAmount, returnedItemAmount);
+        }
+
+        if (!(node instanceof RecipeGraphNode recipeNode)) {
+            return 0;
+        }
+
+        int availableAmount = 0;
+
+        // Collect remainders from all nodes first
+        for (CraftingGraphNode passiveNode : allNodes.get(requestedKey)) {
+            if (availableAmount >= requestedAmount) {
+                break;
+            }
+            if (passiveNode instanceof FluidConversionGraphNode fluidNode) {
+                availableAmount += fluidNode
+                        .collectRemainders(allNodes, requestedKey, requestedAmount - availableAmount);
+            } else {
+                int remainder = passiveNode.getRemainder(requestedKey);
+                if (remainder > 0) {
+                    int min = Math.min(remainder, requestedAmount - availableAmount);
+                    passiveNode.addToRemainders(requestedKey, -min);
+                    availableAmount += min;
+                }
+            }
+        }
+        int amountToRequest = requestedAmount - availableAmount;
+
+        BookmarkRecipeId recipeId = recipeNode.getRecipeId();
+        // Handle recursive recipes
+        if (history.contains(recipeId)) {
+            return availableAmount;
+        }
+
+        if (amountToRequest <= 0) {
+            if (keepOutputs) {
+                recipeNode.addToRemainders(requestedKey, requestedAmount);
+            }
+            return requestedAmount;
+        }
+
+        // Calculate number of requested crafts
+        int crafts = 0;
+        for (Map.Entry<String, Integer> outputItemStack : recipeNode.getRecipeOutputs().entrySet()) {
+            if (Objects.equals(outputItemStack.getKey(), requestedKey)) {
+                crafts = NEIServerUtils.divideCeil(amountToRequest, outputItemStack.getValue());
+                break;
+            }
+        }
+        if (!keepOutputs) {
+            recipeNode.addToRemainders(requestedKey, -amountToRequest);
+        }
+        for (Map.Entry<String, Integer> outputItemStack : recipeNode.getRecipeOutputs().entrySet()) {
+            if (recipeNode.getPinnedOutputKeys().containsKey(outputItemStack.getKey())) {
+                recipeNode.addToRemainders(outputItemStack.getKey(), outputItemStack.getValue() * crafts);
+            }
+        }
+
+        recipeNode.addCrafts(crafts);
+        final int finalCrafts = crafts;
+
+        // Process inputs
+        final Map<String, Integer> ingredientsToRequest = new LinkedHashMap<>();
+
+        for (Map<String, Integer> ingredientCandidates : recipeNode.getRecipeIngredients()) {
+            // Intersect current pinned inputs with recipe inputs
+            Set<String> pinnedCurrentRecipeInputs = new HashSet<>(recipeNode.getPinnedInputKeys().keySet());
+            pinnedCurrentRecipeInputs.retainAll(ingredientCandidates.keySet());
+            // Intersect all pinned outputs with recipe inputs
+            Set<String> pinnedRecipeOutputs = new HashSet<>(this.nodes.keySet());
+            pinnedRecipeOutputs.retainAll(ingredientCandidates.keySet());
+
+            // Nothing to do here
+            if (pinnedCurrentRecipeInputs.isEmpty()) {
+                continue;
+            }
+
+            String keyToRequest = pinnedCurrentRecipeInputs.iterator().next();
+            if (this.nodes.containsKey(keyToRequest)) { // Try to request pinned item exactly or convert fluids;
+                ingredientsToRequest.compute(
+                        keyToRequest,
+                        (k, v) -> (v == null ? 0 : v) + ingredientCandidates.get(keyToRequest) * finalCrafts);
+            } else if (!pinnedRecipeOutputs.isEmpty()) { // Fallback to oredict
+                String fallbackKey = pinnedRecipeOutputs.iterator().next();
+                ingredientsToRequest.compute(
+                        fallbackKey,
+                        (k, v) -> (v == null ? 0 : v) + ingredientCandidates.get(fallbackKey) * finalCrafts);
+            } else { // Otherwise add pinned item to crafting chain inputs
+                String key = pinnedCurrentRecipeInputs.iterator().next();
+                recipeNode.addToChainInputs(key, ingredientCandidates.get(key) * finalCrafts);
+            }
+        }
+
+        for (Map.Entry<String, Integer> entry : ingredientsToRequest.entrySet()) {
+            history.add(recipeId);
+            int provided = dfs(entry.getKey(), entry.getValue(), history, false);
+            int chainInputs = entry.getValue() - provided;
+            recipeNode.addToChainInputs(entry.getKey(), chainInputs);
+            history.remove(recipeId);
+        }
+        return requestedAmount;
+    }
+
+    public void postProcess() {
         this.calculatedItems.clear();
         this.calculatedCraftCounts.clear();
-        this.craftedOutputSlots.clear();
+        this.calculatedRemainders.clear();
 
         this.inputStacks.clear();
         this.remainingStacks.clear();
 
-        for (Map.Entry<String, Integer> entry : inputTotal.entrySet()) {
-            ItemStack inputStack = this.itemStackDummies.get(entry.getKey());
-            if (inputStack != null) {
-                this.inputStacks.add(withStackSize(inputStack, entry.getValue()));
-            }
-        }
-
         Map<String, Integer> remainders = new HashMap<>();
+        Map<String, Integer> inputs = new HashMap<>();
+        Map<String, Integer> outputs = new HashMap<>();
+
+        Map<String, Integer> consumedEmptyContainers = new HashMap<>();
+        Map<String, Integer> producedEmptyContainers = new HashMap<>();
+
         IdentityHashMap<CraftingGraphNode, Void> distinctNodes = new IdentityHashMap<>();
         for (CraftingGraphNode value : nodes.values()) {
             distinctNodes.put(value, null);
         }
 
         for (CraftingGraphNode node : distinctNodes.keySet()) {
+            if (node instanceof FluidConversionGraphNode fluidNode) {
+                for (Map.Entry<String, Integer> containerEntry : fluidNode.getConsumedEmptyContainers().entrySet()) {
+                    consumedEmptyContainers.compute(
+                            containerEntry.getKey(),
+                            (k, v) -> (v == null ? 0 : v) + containerEntry.getValue());
+                }
+                for (Map.Entry<String, Integer> containerEntry : fluidNode.getProducedEmptyContainers().entrySet()) {
+                    producedEmptyContainers.compute(
+                            containerEntry.getKey(),
+                            (k, v) -> (v == null ? 0 : v) + containerEntry.getValue());
+                }
+            }
+        }
+
+        for (CraftingGraphNode node : distinctNodes.keySet()) {
             if (node instanceof RecipeGraphNode recipeNode) {
                 for (ItemStackWithMetadata pinnedOutput : recipeNode.getPinnedOutputs()) {
                     String key = getItemStackGUID(pinnedOutput.getStack());
-                    int newCount = recipeNode.getRecipe().result.stream()
-                            .filter(it -> Objects.equals(key, getItemStackGUID(it))).findFirst()
-                            .map(it -> getStackSize(it) * recipeNode.getCrafts()).orElse(0);
-
-                    ItemStack stack = withStackSize(pinnedOutput.getStack(), newCount);
-                    this.calculatedItems.put(pinnedOutput.getGridIdx(), stack);
-                    this.calculatedCraftCounts.put(pinnedOutput.getGridIdx(), recipeNode.getCrafts());
-                    if (newCount > 0) {
-                        this.craftedOutputSlots.add(pinnedOutput.getGridIdx());
+                    int calculatedCount = recipeNode.getRecipeOutputs().getOrDefault(key, 0) * recipeNode.getCrafts();
+                    // Remove empty containers from results
+                    if (consumedEmptyContainers.containsKey(key)) {
+                        int toRemove = Math.min(recipeNode.getRemainder(key), consumedEmptyContainers.get(key));
+                        consumedEmptyContainers.put(key, consumedEmptyContainers.get(key) - toRemove);
+                        recipeNode.addToRemainders(key, -toRemove);
                     }
+
+                    this.calculatedItems
+                            .put(pinnedOutput.getGridIdx(), withStackSize(pinnedOutput.getStack(), calculatedCount));
+                    this.calculatedRemainders.put(
+                            pinnedOutput.getGridIdx(),
+                            withStackSize(pinnedOutput.getStack(), recipeNode.getRemainder(key)));
+                    this.calculatedCraftCounts.put(pinnedOutput.getGridIdx(), recipeNode.getCrafts());
                 }
+
                 for (ItemStackWithMetadata pinnedInput : recipeNode.getPinnedInputs()) {
                     String key = getItemStackGUID(pinnedInput.getStack());
-                    int newCount = recipeNode.getRecipe().allIngredients.stream().flatMap(Collection::stream)
-                            .filter(it -> Objects.requireNonNull(getItemStackGUID(it)).equals(key))
-                            .map(it -> getStackSize(it) * recipeNode.getCrafts()).mapToInt(it -> it).sum();
+                    int calculatedCount = recipeNode.getRecipeIngredients().stream()
+                            .flatMap(it -> it.entrySet().stream())
+                            .filter(it -> Objects.requireNonNull(it.getKey()).equals(key))
+                            .mapToInt(it -> it.getValue() * recipeNode.getCrafts()).sum();
+                    // Remove empty containers from results
+                    if (producedEmptyContainers.containsKey(key)) {
+                        int toRemove = Math.min(recipeNode.getChainInput(key), producedEmptyContainers.get(key));
+                        producedEmptyContainers.put(key, producedEmptyContainers.get(key) - toRemove);
+                        recipeNode.addToChainInputs(key, -toRemove);
+                    }
 
-                    ItemStack stack = withStackSize(pinnedInput.getStack(), newCount);
-                    this.calculatedItems.put(pinnedInput.getGridIdx(), stack);
+                    this.calculatedItems
+                            .put(pinnedInput.getGridIdx(), withStackSize(pinnedInput.getStack(), calculatedCount));
+                    this.calculatedRemainders.put(
+                            pinnedInput.getGridIdx(),
+                            withStackSize(pinnedInput.getStack(), recipeNode.getChainInput(key)));
                 }
 
                 for (Map.Entry<String, Integer> entry : recipeNode.getRemainders().entrySet()) {
+                    int slotIdx = recipeNode.getPinnedOutputKeys().get(entry.getKey());
+                    this.outputSlots.add(slotIdx);
+                    int output = Math.min(entry.getValue(), requestedItems.getOrDefault(entry.getKey(), 0));
+                    int remainder = Math.max(0, entry.getValue() - requestedItems.getOrDefault(entry.getKey(), 0));
+                    remainders.compute(entry.getKey(), (k, v) -> (v == null ? 0 : v) + remainder);
+                    outputs.compute(entry.getKey(), (k, v) -> (v == null ? 0 : v) + output);
+                }
+
+                for (Map.Entry<String, Integer> entry : recipeNode.getChainInputs().entrySet()) {
+                    int slotIdx = recipeNode.getPinnedInputKeys().get(entry.getKey());
+                    this.inputSlots.add(slotIdx);
+                    inputs.compute(entry.getKey(), (k, v) -> (v == null ? 0 : v) + entry.getValue());
+                }
+            } else if (node instanceof ItemGraphNode itemGraphNode) {
+                ItemStackWithMetadata pinnedItem = itemGraphNode.getPinnedItem();
+                String key = getItemStackGUID(pinnedItem.getStack());
+                int amount = itemGraphNode.getRemainder(key);
+                ItemStack stack = withStackSize(pinnedItem.getStack(), amount);
+                this.calculatedItems.put(pinnedItem.getGridIdx(), stack);
+                this.calculatedRemainders.put(pinnedItem.getGridIdx(), stack);
+                this.calculatedCraftCounts.put(pinnedItem.getGridIdx(), 0);
+                this.inputSlots.add(pinnedItem.getGridIdx());
+                inputs.compute(key, (k, v) -> (v == null ? 0 : v) + amount);
+            } else if (node instanceof FluidConversionGraphNode fluidNode) {
+                Map.Entry<String, Integer> entry = fluidNode.getRemainders().entrySet().iterator().next();
+                if (entry.getKey() != null) {
                     remainders.compute(entry.getKey(), (k, v) -> (v == null ? 0 : v) + entry.getValue());
                 }
-            } else {
-                ItemGraphNode itemGraphNode = (ItemGraphNode) node;
-                ItemStack stack = withStackSize(
-                        itemGraphNode.getPinnedItem().getStack(),
-                        itemGraphNode.getRequestedItems());
-                this.calculatedItems.put(itemGraphNode.getPinnedItem().getGridIdx(), stack);
+
+                for (Map.Entry<String, Integer> containerEntry : fluidNode.getConsumedEmptyContainers().entrySet()) {
+                    if (remainders.containsKey(containerEntry.getKey())) {
+                        remainders.compute(
+                                containerEntry.getKey(),
+                                (k, v) -> (v == null ? 0 : v) - containerEntry.getValue());
+                    }
+                }
+                for (Map.Entry<String, Integer> containerEntry : fluidNode.getProducedEmptyContainers().entrySet()) {
+                    if (inputs.containsKey(containerEntry.getKey())) {
+                        inputs.compute(
+                                containerEntry.getKey(),
+                                (k, v) -> (v == null ? 0 : v) - containerEntry.getValue());
+                    }
+                }
             }
         }
-        for (Map.Entry<String, Integer> entry : remainders.entrySet()) {
-            ItemStack stack = itemStackDummies.get(entry.getKey());
-            this.remainingStacks.add(withStackSize(stack, entry.getValue()));
+
+        convertMapToStacks(inputs, this.inputStacks);
+        convertMapToStacks(remainders, this.remainingStacks);
+        convertMapToStacks(outputs, this.outputStacks);
+    }
+
+    private void convertMapToStacks(Map<String, Integer> map, List<ItemStack> stacks) {
+        for (Map.Entry<String, Integer> entry : map.entrySet()) {
+            ItemStack outputStack = this.itemStackMapping.get(entry.getKey());
+            if (outputStack != null && entry.getValue() > 0) {
+                stacks.add(withStackSize(outputStack, entry.getValue()));
+            }
         }
+    }
+
+    private static String getFluidKey(FluidStack fluidStack) {
+        NBTTagCompound nbTag = new NBTTagCompound();
+        nbTag.setBoolean("fluidStack", true);
+        nbTag.setString("gtFluidName", fluidStack.getFluid().getName());
+        return nbTag.toString();
     }
 
     public Map<Integer, ItemStack> getCalculatedItems() {
         return calculatedItems;
+    }
+
+    public Map<Integer, ItemStack> getCalculatedRemainders() {
+        return calculatedRemainders;
     }
 
     public Map<Integer, Integer> getCalculatedCraftCounts() {
@@ -258,27 +432,34 @@ public class CraftingGraph {
     }
 
     public Set<Integer> getCraftedOutputSlots() {
-        return craftedOutputSlots;
+        return outputSlots;
     }
 
-    public Set<ItemStack> getInputStacks() {
+    public Set<Integer> getConflictingSlots() {
+        return conflictingSlots;
+    }
+
+    public List<ItemStack> getInputStacks() {
         return inputStacks;
     }
 
-    public Set<ItemStack> getOutputStacks() {
+    public List<ItemStack> getOutputStacks() {
         return outputStacks;
     }
 
-    public Set<ItemStack> getRemainingStacks() {
+    public List<ItemStack> getRemainingStacks() {
         return remainingStacks;
     }
 
-    private int getStackSize(ItemStack itemStack) {
-        return StackInfo.itemStackToNBT(itemStack).getInteger("Count");
-    }
-
-    private ItemStack withStackSize(ItemStack itemStack, int stackSize) {
+    private static ItemStack withStackSize(ItemStack itemStack, int stackSize) {
         NBTTagCompound tagCompound = StackInfo.itemStackToNBT(itemStack);
         return StackInfo.loadFromNBT(tagCompound, stackSize);
+    }
+
+    public static int getStackSize(ItemStack itemStack) {
+        if (itemStack == null) {
+            return 0;
+        }
+        return StackInfo.itemStackToNBT(itemStack).getInteger("Count");
     }
 }
