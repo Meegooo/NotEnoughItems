@@ -38,6 +38,7 @@ public class StackInfo {
     };
 
     private static Method getContainersFromFluid = null;
+    private static Method getFluidDisplayStack = null;
     private static Class<?> itemCell = null;
 
     static {
@@ -48,6 +49,7 @@ public class StackInfo {
             final Class<?> gtUtility = ReflectionHelper
                     .getClass(loader, "gregtech.api.util.GTUtility", "gregtech.api.util.GT_Utility");
             getContainersFromFluid = gtUtility.getMethod("getContainersFromFluid", FluidStack.class);
+            getFluidDisplayStack = gtUtility.getMethod("getFluidDisplayStack", FluidStack.class, boolean.class);
             itemCell = ReflectionHelper.getClass(loader, "ic2.core.item.resources.ItemCell");
         } catch (Exception e) {
             // do nothing
@@ -252,5 +254,18 @@ public class StackInfo {
         }
 
         return result.copy();
+    }
+
+    public static ItemStack getFluidDisplayStack(FluidStack fluid) {
+        if (getFluidDisplayStack == null || fluid == null) {
+            return null;
+        }
+
+        try {
+            Object itemStack = getFluidDisplayStack.invoke(null, fluid, false);
+            return (ItemStack) itemStack;
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

@@ -2,21 +2,18 @@ package codechicken.nei.bookmarks.crafts;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import net.minecraft.item.ItemStack;
 
 import codechicken.nei.BookmarkPanel;
 import codechicken.nei.bookmarks.crafts.graph.CraftingGraph;
-import codechicken.nei.bookmarks.crafts.graph.CraftingGraphNode;
 import codechicken.nei.bookmarks.crafts.graph.ItemGraphNode;
 import codechicken.nei.bookmarks.crafts.graph.RecipeGraphNode;
 import codechicken.nei.recipe.BookmarkRecipeId;
-import codechicken.nei.recipe.StackInfo;
 
 public class BookmarkCraftingChain {
 
@@ -26,10 +23,10 @@ public class BookmarkCraftingChain {
         if (groupItems.isEmpty()) {
             return;
         }
-        Map<String, CraftingGraphNode> nodes = new HashMap<>();
+        this.graph = new CraftingGraph();
 
-        Map<BookmarkRecipeId, List<ItemStackWithMetadata>> groupedByRecipe = new HashMap<>();
-        Map<BookmarkRecipeId, BookmarkPanel.BookmarkRecipe> recipes = new HashMap<>();
+        LinkedHashMap<BookmarkRecipeId, List<ItemStackWithMetadata>> groupedByRecipe = new LinkedHashMap<>();
+        LinkedHashMap<BookmarkRecipeId, BookmarkPanel.BookmarkRecipe> recipes = new LinkedHashMap<>();
         List<ItemStackWithMetadata> itemsWithoutRecipe = new ArrayList<>();
 
         for (ItemStackWithMetadata groupItem : groupItems) {
@@ -65,10 +62,7 @@ public class BookmarkCraftingChain {
                         if (recipe != null) {
                             RecipeGraphNode node = new RecipeGraphNode(recipe, inputs, outputs);
                             for (ItemStackWithMetadata output : outputs) {
-                                String key = StackInfo.getItemStackGUID(output.getStack());
-                                if (!nodes.containsKey(key) || !(nodes.get(key) instanceof RecipeGraphNode)) {
-                                    nodes.put(key, node);
-                                }
+                                graph.addNode(output, node);
                             }
                         }
                     }
@@ -77,25 +71,24 @@ public class BookmarkCraftingChain {
         }
 
         for (ItemStackWithMetadata itemWithoutRecipe : itemsWithoutRecipe) {
-            String key = StackInfo.getItemStackGUID(itemWithoutRecipe.getStack());
             ItemGraphNode node = new ItemGraphNode(itemWithoutRecipe);
-            if (!nodes.containsKey(key) || !(nodes.get(key) instanceof RecipeGraphNode)) {
-                nodes.put(key, node);
-            }
+            graph.addNode(itemWithoutRecipe, node);
         }
-        this.graph = new CraftingGraph(nodes);
-        List<ItemStackWithMetadata> requestedItems = groupItems.stream().filter(it -> !it.getMeta().ingredient)
-                .collect(Collectors.toList());
         if (skipCalculation) {
-            this.graph.postProcess(Collections.emptyMap());
+            this.graph.postProcess();
         } else {
-            this.graph.dfs(requestedItems);
+            this.graph.runAll();
         }
     }
 
     public Map<Integer, ItemStack> getCalculatedItems() {
         if (this.graph == null) return Collections.emptyMap();
         return this.graph.getCalculatedItems();
+    }
+
+    public Map<Integer, ItemStack> getCalculatedRemainders() {
+        if (this.graph == null) return Collections.emptyMap();
+        return this.graph.getCalculatedRemainders();
     }
 
     public Map<Integer, Integer> getCalculatedCraftCounts() {
@@ -113,18 +106,23 @@ public class BookmarkCraftingChain {
         return this.graph.getCraftedOutputSlots();
     }
 
-    public Set<ItemStack> getInputStacks() {
+    public Set<Integer> getConflictingSlots() {
         if (this.graph == null) return Collections.emptySet();
+        return this.graph.getConflictingSlots();
+    }
+
+    public List<ItemStack> getInputStacks() {
+        if (this.graph == null) return Collections.emptyList();
         return this.graph.getInputStacks();
     }
 
-    public Set<ItemStack> getOutputStacks() {
-        if (this.graph == null) return Collections.emptySet();
+    public List<ItemStack> getOutputStacks() {
+        if (this.graph == null) return Collections.emptyList();
         return this.graph.getOutputStacks();
     }
 
-    public Set<ItemStack> getRemainingStacks() {
-        if (this.graph == null) return Collections.emptySet();
+    public List<ItemStack> getRemainingStacks() {
+        if (this.graph == null) return Collections.emptyList();
         return this.graph.getRemainingStacks();
     }
 }

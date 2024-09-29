@@ -36,6 +36,7 @@ import net.minecraft.inventory.Slot;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.EnumChatFormatting;
+import net.minecraftforge.fluids.FluidStack;
 
 import org.apache.commons.io.IOUtils;
 import org.lwjgl.opengl.GL11;
@@ -1106,11 +1107,12 @@ public class BookmarkPanel extends PanelWidget {
                             drawRect(rect.x, rect.y, rect.w, rect.h, 0x6645DA75); // inputs
                         } else if (groupMeta.crafting.getOutputSlots().contains(idx)) {
                             drawRect(rect.x, rect.y, rect.w, rect.h, 0x9966CCFF); // exports
+                        } else if (groupMeta.crafting.getConflictingSlots().contains(idx)) {
+                            drawRect(rect.x, rect.y, rect.w, rect.h, 0x99d66f6f); // conflicts
                         }
 
                     } else if (focus != null && meta.equalsRecipe(getMetadata(focus.slotIndex))) {
                         drawRect(rect.x, rect.y, rect.w, rect.h, meta.ingredient ? 0x6645DA75 : 0x9966CCFF); // highlight
-                        // recipe
                     } else {
                         super.beforeDrawSlot(focus, idx, rect);
                     }
@@ -1135,6 +1137,9 @@ public class BookmarkPanel extends PanelWidget {
 
             if (groupMeta.crafting != null) {
                 String text = null;
+                if (groupMeta.crafting.getConflictingSlots().contains(idx)) {
+                    return;
+                }
 
                 if (NEIClientUtils.shiftKey()) {
                     int crafts = groupMeta.crafting.getCalculatedCraftCounts().getOrDefault(idx, 0);
@@ -1174,7 +1179,12 @@ public class BookmarkPanel extends PanelWidget {
                 ItemStack drawStack = realStack;
 
                 if (groupMeta.crafting != null) {
-                    ItemStack craftingItemStack = groupMeta.crafting.getCalculatedItems().get(idx);
+                    ItemStack craftingItemStack;
+                    if (NEIClientUtils.shiftKey()) {
+                        craftingItemStack = groupMeta.crafting.getCalculatedRemainders().get(idx);
+                    } else {
+                        craftingItemStack = groupMeta.crafting.getCalculatedItems().get(idx);
+                    }
                     if (craftingItemStack != null) {
                         drawStack = craftingItemStack;
                     } else {
@@ -1359,8 +1369,6 @@ public class BookmarkPanel extends PanelWidget {
             this.groupId = groupId;
             this.craftingChain = craftingChain;
 
-            // TODO stuff
-
             this.inputs = new ItemsTooltipLineHandler(
                     translate("bookmark.crafting_chain.input"),
                     new ArrayList<>(craftingChain.getInputStacks()),
@@ -1382,8 +1390,8 @@ public class BookmarkPanel extends PanelWidget {
             if (!this.inputs.isEmpty() || !this.outputs.isEmpty() || !this.remainder.isEmpty()) {
                 this.size.height += 2 + fontRenderer.FONT_HEIGHT;
                 this.size.width = Math.max(
-                        this.inputs.getSize().width,
-                        Math.max(this.outputs.getSize().width, this.remainder.getSize().width));
+                        Math.max(this.inputs.getSize().width, this.outputs.getSize().width),
+                        this.remainder.getSize().width);
 
                 this.size.height += this.inputs.getSize().height + this.outputs.getSize().height
                         + this.remainder.getSize().height;
@@ -1434,8 +1442,8 @@ public class BookmarkPanel extends PanelWidget {
 
             if (!this.remainder.isEmpty()) {
                 this.remainder.draw(x, y);
+                y += this.remainder.getSize().height;
             }
-
         }
 
     }
@@ -1600,21 +1608,8 @@ public class BookmarkPanel extends PanelWidget {
         }
 
         if (recipeId != null) {
-            final Map<String, NBTTagCompound> uniqueIngredients = new LinkedHashMap<>();
-
             BGrid.removeRecipe(recipeId, groupId);
-
-            for (ItemStack stack : recipe.ingredients) {
-                final String GUID = StackInfo.getItemStackGUID(stack);
-                final NBTTagCompound nbTagU = uniqueIngredients.get(GUID);
-                final NBTTagCompound nbTagS = StackInfo.itemStackToNBT(stack);
-
-                if (nbTagU == null) {
-                    uniqueIngredients.put(GUID, nbTagS);
-                } else {
-                    nbTagU.setInteger("Count", nbTagU.getInteger("Count") + nbTagS.getInteger("Count"));
-                }
-            }
+            final Map<String, NBTTagCompound> uniqueIngredients = getUniqueItems(recipe.ingredients);
 
             for (String GUID : uniqueIngredients.keySet()) {
                 final NBTTagCompound nbTag = uniqueIngredients.get(GUID);
@@ -1625,8 +1620,10 @@ public class BookmarkPanel extends PanelWidget {
             }
         }
 
-        for (ItemStack stack : recipe.result) {
-            final NBTTagCompound nbTag = StackInfo.itemStackToNBT(stack);
+        Map<String, NBTTagCompound> uniqueResults = getUniqueItems(recipe.result);
+
+        for (String GUID : uniqueResults.keySet()) {
+            final NBTTagCompound nbTag = uniqueResults.get(GUID);
             final ItemStack normalized = StackInfo.loadFromNBT(nbTag, saveSize ? nbTag.getInteger("Count") : 0);
             final ItemStackMetadata metadata = new ItemStackMetadata(recipeId, nbTag, false, groupId);
             BGrid.addItem(normalized, metadata);
@@ -1634,6 +1631,23 @@ public class BookmarkPanel extends PanelWidget {
         }
 
         fixCountOfNamespaces();
+    }
+
+    private Map<String, NBTTagCompound> getUniqueItems(List<ItemStack> stacks) {
+        final Map<String, NBTTagCompound> uniqueItems = new LinkedHashMap<>();
+
+        for (ItemStack stack : stacks) {
+            final String GUID = StackInfo.getItemStackGUID(stack);
+            final NBTTagCompound nbTagU = uniqueItems.get(GUID);
+            final NBTTagCompound nbTagS = StackInfo.itemStackToNBT(stack);
+
+            if (nbTagU == null) {
+                uniqueItems.put(GUID, nbTagS);
+            } else {
+                nbTagU.setInteger("Count", nbTagU.getInteger("Count") + nbTagS.getInteger("Count"));
+            }
+        }
+        return uniqueItems;
     }
 
     public void addBookmarkGroup(List<ItemStack> items, BookmarkViewMode viewMode) {
@@ -2625,6 +2639,59 @@ public class BookmarkPanel extends PanelWidget {
     public List<String> handleItemTooltip(GuiContainer gui, ItemStack itemstack, int mousex, int mousey,
             List<String> currenttip) {
 
+        final BookmarkGrid BGrid = (BookmarkGrid) grid;
+        final ItemPanelSlot slot = getSlotMouseOver(mousex, mousey);
+        if (slot != null) {
+            final int overRowIndex = BGrid.getHoveredRowIndex(false);
+            final int groupId = BGrid.getRowGroupId(overRowIndex);
+            final BookmarkGroup group = BGrid.groups.get(groupId);
+            if (group != null && group.crafting != null) {
+                if (group.crafting.getConflictingSlots().contains(slot.slotIndex) && NEIClientUtils.shiftKey()) {
+                    currenttip.add(
+                            EnumChatFormatting.RED + translate("bookmark.conflictingRecipe.tip")
+                                    + EnumChatFormatting.RESET);
+                    return currenttip;
+                }
+                if (!NEIClientUtils.shiftKey()) {
+                    ItemStackMetadata metadata = BGrid.getMetadata(slot.slotIndex);
+                    if (!metadata.ingredient) {
+                        int maxStackSize = itemstack.getMaxStackSize();
+                        FluidStack fluid = StackInfo.getFluid(itemstack);
+                        if (fluid != null) {
+                            maxStackSize = 144;
+                        }
+                        String details;
+                        if (metadata.requestedAmount > 0) {
+                            details = GuiContainerManager.countDetails(
+                                    metadata.requestedAmount,
+                                    maxStackSize,
+                                    "Requested: %s = %s * %s + %s",
+                                    "Requested: %s = %s * %s");
+                        } else {
+                            details = GuiContainerManager.countDetails(
+                                    -metadata.requestedAmount,
+                                    maxStackSize,
+                                    "Requested: -%s = -%s * %s - %s",
+                                    "Requested: -%s = -%s * %s");
+                        }
+                        if (details != null) {
+                            currenttip.add(EnumChatFormatting.GRAY + details + EnumChatFormatting.RESET);
+                        }
+                    }
+                } else {
+                    ItemStackMetadata metadata = BGrid.getMetadata(slot.slotIndex);
+                    if (!metadata.ingredient) {
+                        int crafts = group.crafting.getCalculatedCraftCounts().get(slot.slotIndex);
+                        currenttip.add(
+                                String.format(
+                                        EnumChatFormatting.GRAY + "Crafts: %d" + EnumChatFormatting.RESET,
+                                        crafts));
+                    }
+                }
+            }
+
+        }
+
         if (contains(mousex, mousey) && itemstack != null && this.recipeTooltipLineHandler != null) {
             currenttip.add(GuiDraw.TOOLTIP_HANDLER + GuiDraw.getTipLineId(this.recipeTooltipLineHandler));
         }
@@ -2697,40 +2764,38 @@ public class BookmarkPanel extends PanelWidget {
             if (slot != null) {
                 final BookmarkGrid BGrid = (BookmarkGrid) grid;
                 final ItemStackMetadata overMeta = BGrid.getMetadata(slot.slotIndex);
-                final HashMap<Integer, ItemStack> items = new HashMap<>();
                 int shiftMultiplier = 1;
 
                 if (NEIClientUtils.altKey()) {
                     shiftMultiplier = NEIClientConfig.showItemQuantityWidget() ? NEIClientConfig.getItemQuantity() : 0;
-                    if (shiftMultiplier == 0) {
-                        shiftMultiplier = slot.item.getMaxStackSize();
-                    }
+                }
+                if (shiftMultiplier == 0) {
+                    shiftMultiplier = slot.item.getMaxStackSize();
                 }
 
                 BookmarkGroup group = BGrid.groups.get(overMeta.groupId);
-                if (group.crafting != null) {
-                    if (NEIClientUtils.shiftKey()) {
-                        for (ItemStackMetadata meta : BGrid.metadata) {
-                            if (Objects.equals(meta.recipeId, overMeta.recipeId) && !meta.ingredient) {
-                                meta.requestedAmount += shift * shiftMultiplier * meta.factor;
-                            }
+                if (NEIClientUtils.shiftKey()) {
+                    List<ItemStackMetadata> metadata = BGrid.metadata;
+                    for (int i = 0; i < metadata.size(); i++) {
+                        ItemStackMetadata meta = metadata.get(i);
+                        if (!Objects.equals(meta.recipeId, overMeta.recipeId) || meta.groupId != overMeta.groupId) {
+                            continue;
                         }
-                    } else {
-                        if (!overMeta.ingredient) {
-                            Integer stackSize = StackInfo.getFluidCellSize(BGrid.getItem(slot.slotIndex));
-                            if (overMeta.fluidDisplay && stackSize != null) {
-                                shiftMultiplier *= stackSize;
-                            }
-                            overMeta.requestedAmount += shift * shiftMultiplier;
+                        if (group.crafting != null && !meta.ingredient) {
+                            shiftRequestedAmount(meta, shift, shiftMultiplier * meta.factor);
+                        } else if (group.crafting == null) {
+                            shiftStackSize(BGrid, i, shift, shiftMultiplier * meta.factor);
                         }
                     }
                 } else {
-                    items.put(slot.slotIndex, shiftStackSize(BGrid, slot.slotIndex, shift, shiftMultiplier));
-
-                    for (int slotIndex : items.keySet()) {
-                        if (items.get(slotIndex) != null) {
-                            BGrid.realItems.set(slotIndex, items.get(slotIndex));
-                        }
+                    Integer stackSize = StackInfo.getFluidCellSize(BGrid.getItem(slot.slotIndex));
+                    if (overMeta.fluidDisplay && stackSize != null) {
+                        shiftMultiplier *= stackSize;
+                    }
+                    if (group.crafting != null && !overMeta.ingredient) {
+                        shiftRequestedAmount(overMeta, shift, shiftMultiplier);
+                    } else if (group.crafting == null) {
+                        shiftStackSize(BGrid, slot.slotIndex, shift, shiftMultiplier);
                     }
                 }
 
@@ -2758,21 +2823,35 @@ public class BookmarkPanel extends PanelWidget {
         return false;
     }
 
-    private ItemStack shiftStackSize(BookmarkGrid BGrid, int slotIndex, int shift, int shiftMultiplier) {
+    private void shiftStackSize(BookmarkGrid BGrid, int slotIndex, int shift, int shiftMultiplier) {
         final NBTTagCompound nbTag = StackInfo.itemStackToNBT(BGrid.getItem(slotIndex));
         final ItemStackMetadata meta = BGrid.getMetadata(slotIndex);
 
         if (meta.factor > 0) {
-            final int multiplier = nbTag.getInteger("Count") / meta.factor;
-            final long count = ((long) (multiplier + shift * shiftMultiplier) / shiftMultiplier) * shiftMultiplier
-                    * meta.factor;
-
-            if (count <= Integer.MAX_VALUE) {
-                return StackInfo.loadFromNBT(nbTag, Math.max(count, 0));
-            }
+            final int originalCount = nbTag.getInteger("Count");
+            final long count = calculateShiftedValue(originalCount, shift, shiftMultiplier);
+            ItemStack newStack = StackInfo.loadFromNBT(nbTag, Math.max(count, 0));
+            BGrid.realItems.set(slotIndex, newStack);
         }
+    }
 
-        return null;
+    private int calculateShiftedValue(int originalCount, int shift, int shiftMultiplier) {
+        long newValue = originalCount + (long) shift * shiftMultiplier;
+        newValue -= Math.floorMod(newValue, (shift * shiftMultiplier));
+        if (newValue <= Integer.MAX_VALUE) {
+            return (int) newValue;
+        } else {
+            return originalCount;
+        }
+    }
+
+    private void shiftRequestedAmount(ItemStackMetadata meta, int shift, int shiftMultiplier) {
+        long newValue = calculateShiftedValue(meta.requestedAmount, shift, shiftMultiplier);
+        if (!NEIClientConfig.allowNegativeRequests()) {
+            newValue = Math.max(0, newValue);
+        }
+        meta.requestedAmount = (int) newValue;
+
     }
 
     public boolean pullBookmarkItems(int groupId, boolean onlyIngredients) {
