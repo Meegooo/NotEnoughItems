@@ -200,9 +200,6 @@ public class NEIClientConfig {
         tag.getTag("inventory.bookmarks.allowNegativeRequests").getBooleanValue(false);
         API.addOption(new OptionToggleButton("inventory.bookmarks.allowNegativeRequests", true));
 
-        tag.getTag("inventory.bookmarks.showCatalysts").getIntValue(0);
-        API.addOption(new OptionCycled("inventory.bookmarks.showCatalysts", 3, true));
-
         tag.getTag("inventory.bookmarks.ignorePotionOverlap").setComment("Ignore overlap with potion effect HUD")
                 .getBooleanValue(false);
         API.addOption(new OptionToggleButton("inventory.bookmarks.ignorePotionOverlap", true));
@@ -806,10 +803,6 @@ public class NEIClientConfig {
 
     public static boolean allowNegativeRequests() {
         return getBooleanSetting("inventory.bookmarks.allowNegativeRequests");
-    }
-
-    public static int showUnusedCatalysts() {
-        return getIntSetting("inventory.bookmarks.showCatalysts");
     }
 
     public static boolean showItemQuantityWidget() {
