@@ -392,8 +392,24 @@ public class BookmarkPanel extends PanelWidget {
         }
 
         public void toggleCraftingMode(int groupId) {
-            this.groups.get(groupId).toggleCraftingMode();
+            BookmarkGroup group = this.groups.get(groupId);
+            if (group.crafting != null) {
+                copyStackSizesFromCrafting(groupId, group.crafting);
+            }
+            group.toggleCraftingMode();
             onItemsChanged();
+        }
+
+        public void copyStackSizesFromCrafting(int groupId, BookmarkCraftingChain craftingChain) {
+            for (int i = 0; i < metadata.size(); i++) {
+                ItemStackMetadata metadata = getMetadata(i);
+                if (metadata.groupId == groupId) {
+                    ItemStack calculatedStack = craftingChain.getCalculatedItems().get(i);
+                    if (calculatedStack != null) {
+                        realItems.set(i, calculatedStack);
+                    }
+                }
+            }
         }
 
         @Override
@@ -878,6 +894,26 @@ public class BookmarkPanel extends PanelWidget {
                                 this.metadata.get(idx).groupId = groupId;
                             }
                         }
+            }
+
+            if (groupIdA == DEFAULT_GROUP_ID) {
+                int start = Math.min(groupingItem.startItemIndexTop, groupingItem.endItemIndexTop);
+                int end = Math.min(groupingItem.startItemIndexBottom, groupingItem.endItemIndexBottom);
+                boolean skip = false;
+                for (int i = start; i <= bottomItemIndex; i++) {
+                    if (this.metadata.get(i).requestedAmount != 0) {
+                        skip = true;
+                        break;
+                    }
+                }
+                if (!skip) {
+                    for (int i = start; i <= end; i++) {
+                        ItemStackMetadata meta = this.metadata.get(i);
+                        if (!meta.ingredient) {
+                            meta.requestedAmount = StackInfo.itemStackToNBT(getItem(i)).getInteger("Count");
+                        }
+                    }
+                }
             }
 
             final HashSet<Integer> usedSetIds = new HashSet<>();
@@ -1624,11 +1660,22 @@ public class BookmarkPanel extends PanelWidget {
 
         Map<String, NBTTagCompound> uniqueResults = getUniqueItems(recipe.result);
 
+        boolean isGroupEmpty = true;
+        for (int rowGroupId : BGrid.gridGroupMask) {
+            if (rowGroupId == groupId) {
+                isGroupEmpty = false;
+                break;
+            }
+        }
+
         for (String GUID : uniqueResults.keySet()) {
             final NBTTagCompound nbTag = uniqueResults.get(GUID);
             final ItemStack normalized = StackInfo.loadFromNBT(nbTag, saveSize ? nbTag.getInteger("Count") : 0);
             final ItemStackMetadata metadata = new ItemStackMetadata(recipeId, nbTag, false, groupId);
             metadata.fullRecipe = recipe;
+            if (isGroupEmpty && saveSize) {
+                metadata.requestedAmount = nbTag.getInteger("Count");
+            }
             BGrid.addItem(normalized, metadata);
         }
 
@@ -2279,7 +2326,7 @@ public class BookmarkPanel extends PanelWidget {
                 }
 
             } else if (mouseOverSlot != null
-                    && this.sortableItem.items.indexOf(BGrid.realItems.get(mouseOverSlot.slotIndex)) == -1) {
+                    && !this.sortableItem.items.contains(BGrid.realItems.get(mouseOverSlot.slotIndex))) {
                         final ItemStackMetadata meta = BGrid.getMetadata(mouseOverSlot.slotIndex);
 
                         if (meta.groupId == sortMeta.groupId) {
@@ -2786,7 +2833,10 @@ public class BookmarkPanel extends PanelWidget {
                         if (group.crafting != null && !meta.ingredient) {
                             shiftRequestedAmount(meta, shift, shiftMultiplier * meta.factor);
                         } else if (group.crafting == null) {
-                            shiftStackSize(BGrid, i, shift, shiftMultiplier * meta.factor);
+                            int newSize = shiftStackSize(BGrid, i, shift, shiftMultiplier * meta.factor);
+                            if (!meta.ingredient && overMeta.requestedAmount != 0) {
+                                meta.requestedAmount = newSize;
+                            }
                         }
                     }
                 } else {
@@ -2797,7 +2847,10 @@ public class BookmarkPanel extends PanelWidget {
                     if (group.crafting != null && !overMeta.ingredient) {
                         shiftRequestedAmount(overMeta, shift, shiftMultiplier);
                     } else if (group.crafting == null) {
-                        shiftStackSize(BGrid, slot.slotIndex, shift, shiftMultiplier);
+                        int newSize = shiftStackSize(BGrid, slot.slotIndex, shift, shiftMultiplier);
+                        if (!overMeta.ingredient && overMeta.requestedAmount != 0) {
+                            overMeta.requestedAmount = newSize;
+                        }
                     }
                 }
 
@@ -2825,16 +2878,18 @@ public class BookmarkPanel extends PanelWidget {
         return false;
     }
 
-    private void shiftStackSize(BookmarkGrid BGrid, int slotIndex, int shift, int shiftMultiplier) {
+    private int shiftStackSize(BookmarkGrid BGrid, int slotIndex, int shift, int shiftMultiplier) {
         final NBTTagCompound nbTag = StackInfo.itemStackToNBT(BGrid.getItem(slotIndex));
         final ItemStackMetadata meta = BGrid.getMetadata(slotIndex);
 
         if (meta.factor > 0) {
             final int originalCount = nbTag.getInteger("Count");
-            final long count = calculateShiftedValue(originalCount, shift, shiftMultiplier);
-            ItemStack newStack = StackInfo.loadFromNBT(nbTag, Math.max(count, 0));
+            final int count = Math.max(calculateShiftedValue(originalCount, shift, shiftMultiplier), 0);
+            ItemStack newStack = StackInfo.loadFromNBT(nbTag, count);
             BGrid.realItems.set(slotIndex, newStack);
+            return count;
         }
+        return 0;
     }
 
     private int calculateShiftedValue(int originalCount, int shift, int shiftMultiplier) {
