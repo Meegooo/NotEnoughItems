@@ -381,7 +381,7 @@ public class CraftingGraph {
             } else if (node instanceof ItemGraphNode itemGraphNode) {
                 ItemStackWithMetadata pinnedItem = itemGraphNode.getPinnedItem();
                 String key = getItemStackGUID(pinnedItem.getStack());
-                int amount = itemGraphNode.getRemainder(key);
+                int amount = -itemGraphNode.getRemainder(key);
                 ItemStack stack = withStackSize(pinnedItem.getStack(), amount);
                 this.calculatedItems.put(pinnedItem.getGridIdx(), stack);
                 this.calculatedRemainders.put(pinnedItem.getGridIdx(), stack);
